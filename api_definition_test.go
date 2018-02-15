@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -198,6 +199,9 @@ func startRPCMock(dispatcher *gorpc.Dispatcher) *gorpc.Server {
 	config.Global.SlaveOptions.UseRPC = true
 	config.Global.SlaveOptions.RPCKey = "test_org"
 	config.Global.SlaveOptions.APIKey = "test"
+	config.Global.Policies.PolicySource = "rpc"
+	config.Global.SlaveOptions.CallTimeout = 1
+	config.Global.SlaveOptions.RPCPoolSize = 2
 
 	server := gorpc.NewTCPServer("127.0.0.1:0", dispatcher.NewHandlerFunc())
 	list := &customListener{}
@@ -217,6 +221,7 @@ func stopRPCMock(server *gorpc.Server) {
 	config.Global.SlaveOptions.RPCKey = ""
 	config.Global.SlaveOptions.APIKey = ""
 	config.Global.SlaveOptions.UseRPC = false
+	config.Global.Policies.PolicySource = ""
 
 	server.Listener.Close()
 	server.Stop()
@@ -250,19 +255,68 @@ func TestSyncAPISpecsRPCSuccess(t *testing.T) {
 	// Mock RPC
 	dispatcher := gorpc.NewDispatcher()
 	dispatcher.AddFunc("GetApiDefinitions", func(clientAddr string, dr *DefRequest) (string, error) {
-		return "[{}]", nil
+		return "[" + sampleAPI + "]", nil
+	})
+	dispatcher.AddFunc("GetPolicies", func(clientAddr string, orgid string) (string, error) {
+		return `[{"_id":"507f191e810c19729de860ea", "rate":1, "per":1}]`, nil
 	})
 	dispatcher.AddFunc("Login", func(clientAddr, userKey string) bool {
 		return true
+	})
+	dispatcher.AddFunc("GetKey", func(clientAddr, key string) (string, error) {
+		return "", fmt.Errorf("Not found")
 	})
 
 	rpc := startRPCMock(dispatcher)
 	defer stopRPCMock(rpc)
 
+	ts := newTykTestServer()
+
+	apiBackup := LoadDefinitionsFromRPCBackup()
+	if len(apiBackup) != 1 {
+		t.Fatal("Should have APIs in backup")
+	}
+
+	policyBackup := LoadPoliciesFromRPCBackup()
+	if len(policyBackup) != 1 {
+		t.Fatal("Should have Policies in backup")
+	}
+
+	ts.Run(t, []test.TestCase{
+		{Path: "/sample", Code: 200},
+	}...)
+
 	count := syncAPISpecs()
 	if count != 1 {
 		t.Error("Should return array with one spec", apiSpecs)
 	}
+
+	// Point rpc to non existent address
+	config.Global.SlaveOptions.ConnectionString = testHttpFailure
+	RPCCLientSingleton.Stop()
+	RPCClientIsConnected = false
+	RPCCLientSingleton = nil
+	RPCFuncClientSingleton = nil
+	rpcLoadCount = 0
+	rpcEmergencyMode = false
+	rpcEmergencyModeLoaded = false
+	GlobalRPCCallTimeout = 100 * time.Millisecond
+	ts.Close()
+
+	// RPC layer is down
+	ts = newTykTestServer()
+	defer ts.Close()
+
+	// Wait for backup to load
+	time.Sleep(100 * time.Millisecond)
+
+	// Still should work!
+	ts.Run(t, []test.TestCase{
+		{Path: "/sample", Code: 200},
+	}...)
+
+	rpcEmergencyModeLoaded = false
+	rpcEmergencyMode = false
 }
 
 func TestSyncAPISpecsDashboardSuccess(t *testing.T) {

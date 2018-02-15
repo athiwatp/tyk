@@ -6,6 +6,7 @@ import (
 
 	"gopkg.in/vmihailenco/msgpack.v2"
 
+	"github.com/TykTechnologies/tyk/config"
 	"github.com/TykTechnologies/tyk/storage"
 )
 
@@ -41,6 +42,11 @@ func (r RPCPurger) PurgeLoop(sleep time.Duration) {
 
 // PurgeCache will pull the data from the in-memory store and drop it into the specified MongoDB collection
 func (r *RPCPurger) PurgeCache() {
+	if _, err := RPCFuncClientSingleton.Call("Ping", nil); err != nil {
+		log.Error("Failed to ping RPC: ", err)
+		return
+	}
+
 	analyticsValues := r.Store.GetAndDeleteSet(analyticsKeyName)
 	if len(analyticsValues) == 0 {
 		return
@@ -69,4 +75,29 @@ func (r *RPCPurger) PurgeCache() {
 		log.Error("Failed to call purge: ", err)
 	}
 
+}
+
+type RedisPurger struct {
+	Store storage.Handler
+}
+
+func (r RedisPurger) PurgeLoop(sleep time.Duration) {
+	for {
+		time.Sleep(sleep)
+		r.PurgeCache()
+	}
+}
+
+func (r *RedisPurger) PurgeCache() {
+	configMu.Lock()
+	expireAfter := config.Global.AnalyticsConfig.StorageExpirationTime
+	configMu.Unlock()
+	if expireAfter == 0 {
+		expireAfter = 60 // 1 minute
+	}
+
+	exp, _ := r.Store.GetExp(analyticsKeyName)
+	if exp <= 0 {
+		r.Store.SetExp(analyticsKeyName, int64(expireAfter))
+	}
 }

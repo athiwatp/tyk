@@ -152,13 +152,15 @@ func setupGlobals() {
 		analytics.Store = &analyticsStore
 		analytics.Init()
 
+		redisPurger := RedisPurger{Store: &analyticsStore}
+		go redisPurger.PurgeLoop(1 * time.Second)
+
 		if config.Global.AnalyticsConfig.Type == "rpc" {
 			log.Debug("Using RPC cache purge")
 
 			purger := RPCPurger{Store: &analyticsStore}
 			purger.Connect()
-			analytics.Clean = &purger
-			go analytics.Clean.PurgeLoop(10 * time.Second)
+			go purger.PurgeLoop(10 * time.Second)
 		}
 	}
 
@@ -676,9 +678,9 @@ func doReload() {
 
 	mainRouter = newRouter
 
-	// Unset these
-	rpcEmergencyModeLoaded = false
-	rpcEmergencyMode = false
+	// // Unset these
+	// rpcEmergencyModeLoaded = false
+	// rpcEmergencyMode = false
 }
 
 // startReloadChan and reloadDoneChan are used by the two reload loops
@@ -1275,6 +1277,7 @@ func handleDashboardRegistration() {
 	go DashService.StartBeating()
 }
 
+var drlOnce sync.Once
 func startDRL() {
 	switch {
 	case config.Global.ManagementNode:
@@ -1311,6 +1314,8 @@ func listen(l, controlListener net.Listener, err error) {
 		writeTimeout = config.Global.HttpServerOptions.WriteTimeout
 	}
 
+	drlOnce.Do(startDRL)
+
 	// Handle reload when SIGUSR2 is received
 	if err != nil {
 		// Listen on a TCP or a UNIX domain socket (TCP here).
@@ -1320,8 +1325,6 @@ func listen(l, controlListener net.Listener, err error) {
 
 		// handle dashboard registration and nonces if available
 		handleDashboardRegistration()
-
-		startDRL()
 
 		if !rpcEmergencyMode {
 			count := syncAPISpecs()
@@ -1396,7 +1399,6 @@ func listen(l, controlListener net.Listener, err error) {
 			os.Setenv("TYK_SERVICE_NONCE", "")
 			os.Setenv("TYK_SERVICE_NODEID", "")
 		}
-		startDRL()
 
 		// Resume accepting connections in a new goroutine.
 		if !rpcEmergencyMode {
